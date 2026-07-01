@@ -362,3 +362,89 @@ header {
 }
 .serving-input:focus { border-color: var(--teal); }
 .result-add-btn { margin-left: auto; }
+
+/* ── Workout Sessions ── */
+.session-block {
+  background: var(--surface2);
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+.session-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.session-type { font-size: 1rem; font-weight: 700; color: var(--teal); }
+.add-exercise-to-session { margin-top: 8px; }
+
+/* ── Quick type chips ── */
+.quick-types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.chip {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 20px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.chip:hover { border-color: var(--teal); color: var(--teal); }
+.chip.active { background: var(--teal); color: #0F1117; border-color: var(--teal); }
+
+/* ── Filter chips row (history) ── */
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+/* ── History list ── */
+.history-list { max-height: 50vh; overflow-y: auto; }
+.history-session {
+  background: var(--surface2);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+.history-session-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.history-type { font-weight: 700; color: var(--teal); font-size: 0.9rem; }
+.history-date { font-size: 0.75rem; color: var(--muted); }
+.history-exercises { font-size: 0.8rem; color: var(--text); opacity: 0.85; line-height: 1.4; }
+
+/* ── Barcode Scanner ── */
+#barcode-reader {
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 10px;
+  min-height: 0;
+}
+#barcode-reader video { border-radius: 12px; width: 100%; }
+
+/* ── Food amount label ── */
+.food-amt { font-size: 0.75rem; color: var(--muted); font-weight: 400; }
+
+/* ── Serving row with unit select ── */
+.result-serving-row .serving-input { width: 56px; }
+.result-serving-row .serving-unit {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.8rem;
+  padding: 6px 6px;
+  outline: none;
+}

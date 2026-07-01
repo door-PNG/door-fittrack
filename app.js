@@ -3,21 +3,22 @@ const DEFAULT_GOALS = { calories: 2000, protein: 150, carbs: 200, fat: 65 };
 
 function loadState() {
   return {
-    goals:    JSON.parse(localStorage.getItem('ft_goals'))    || { ...DEFAULT_GOALS },
-    foodLog:  JSON.parse(localStorage.getItem('ft_foodLog'))  || {},
-    workouts: JSON.parse(localStorage.getItem('ft_workouts')) || {},
+    goals:      JSON.parse(localStorage.getItem('ft_goals'))      || { ...DEFAULT_GOALS },
+    foodLog:    JSON.parse(localStorage.getItem('ft_foodLog'))    || {},   // { "YYYY-MM-DD": [{name,calories,protein,carbs,fat,meal,unit,amount}] }
+    workoutLog: JSON.parse(localStorage.getItem('ft_workoutLog')) || {},   // { "YYYY-MM-DD": [{id, type, exercises:[{name, sets:[{weight,reps}]}]}] }
   };
 }
 
 function save() {
-  localStorage.setItem('ft_goals',    JSON.stringify(state.goals));
-  localStorage.setItem('ft_foodLog',  JSON.stringify(state.foodLog));
-  localStorage.setItem('ft_workouts', JSON.stringify(state.workouts));
+  localStorage.setItem('ft_goals',      JSON.stringify(state.goals));
+  localStorage.setItem('ft_foodLog',    JSON.stringify(state.foodLog));
+  localStorage.setItem('ft_workoutLog', JSON.stringify(state.workoutLog));
 }
 
 let state = loadState();
 let currentPage = 'nutrition';
-let pendingMeal = 'breakfast'; // which meal the Add Food modal is adding to
+let pendingMeal = 'breakfast';
+let html5QrCode = null;
 
 const MEALS = [
   { key: 'breakfast', label: 'Breakfast', icon: '🌅' },
@@ -26,23 +27,49 @@ const MEALS = [
   { key: 'snacks',    label: 'Snacks',    icon: '🍪' },
 ];
 
+// Common workout session types — user can also type a custom one
+const WORKOUT_TYPES = ['Push', 'Pull', 'Legs', 'Back', 'Chest', 'Shoulders', 'Arms', 'Core', 'Full Body', 'Cardio'];
+
+// ── Migration ──────────────────────────────────────────────────────────────
+function migrate() {
+  let changed = false;
+
+  // Old foodLog entries: add meal/unit/amount defaults
+  Object.values(state.foodLog).forEach(dayFoods => {
+    dayFoods.forEach(f => {
+      if (!f.meal) { f.meal = 'snacks'; changed = true; }
+      if (!f.unit) { f.unit = 'g'; changed = true; }
+      if (f.amount === undefined) { f.amount = 100; changed = true; }
+    });
+  });
+
+  // Old workouts format: { "date": [{name, sets}] } -> migrate to workoutLog sessions
+  const oldWorkouts = JSON.parse(localStorage.getItem('ft_workouts'));
+  if (oldWorkouts && Object.keys(oldWorkouts).length) {
+    Object.entries(oldWorkouts).forEach(([date, exercises]) => {
+      if (exercises && exercises.length) {
+        if (!state.workoutLog[date]) state.workoutLog[date] = [];
+        state.workoutLog[date].push({
+          id: 'sess_' + Math.random().toString(36).slice(2),
+          type: 'Workout',
+          exercises: exercises,
+        });
+        changed = true;
+      }
+    });
+    localStorage.removeItem('ft_workouts');
+  }
+
+  if (changed) save();
+}
+migrate();
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 function today() { return new Date().toISOString().slice(0, 10); }
 function fmt(n) { return Math.round(n); }
 function todayFoods() { return state.foodLog[today()] || []; }
-function todayWorkouts() { return state.workouts[today()] || []; }
-
-// Migrate old entries (no meal field) to "snacks" so nothing is lost
-function migrateFoodLog() {
-  let changed = false;
-  Object.values(state.foodLog).forEach(dayFoods => {
-    dayFoods.forEach(f => {
-      if (!f.meal) { f.meal = 'snacks'; changed = true; }
-    });
-  });
-  if (changed) save();
-}
-migrateFoodLog();
+function todaySessions() { return state.workoutLog[today()] || []; }
+function uid() { return 's_' + Date.now() + Math.random().toString(36).slice(2, 7); }
 
 function totals(foods) {
   return foods.reduce((acc, f) => ({
@@ -54,6 +81,13 @@ function totals(foods) {
 }
 
 function pct(val, goal) { return Math.min(1, goal > 0 ? val / goal : 0); }
+
+function unitLabel(unit) {
+  if (unit === 'g') return 'g';
+  if (unit === 'ml') return 'ml';
+  if (unit === 'serving') return 'serving(s)';
+  return unit;
+}
 
 // ── Router ─────────────────────────────────────────────────────────────────
 function navigate(page) {
@@ -84,13 +118,13 @@ function renderNutrition() {
     const mealFoods = foods.filter(f => f.meal === m.key);
     const mt = totals(mealFoods);
     const items = mealFoods.length
-      ? mealFoods.map((f, i) => {
-          // find true index in full foods array for delete
+      ? mealFoods.map(f => {
           const trueIdx = foods.indexOf(f);
+          const amountStr = f.amount ? `${f.amount}${f.unit === 'serving' ? ' serving' + (f.amount != 1 ? 's' : '') : unitLabel(f.unit)}` : '';
           return `
           <div class="food-item">
             <div>
-              <div class="food-name">${f.name}</div>
+              <div class="food-name">${f.name}${amountStr ? ` <span class="food-amt">(${amountStr})</span>` : ''}</div>
               <div class="food-macros">P: ${fmt(f.protein)}g &nbsp;C: ${fmt(f.carbs)}g &nbsp;F: ${fmt(f.fat)}g</div>
             </div>
             <div style="display:flex;align-items:center;gap:8px">
@@ -148,34 +182,98 @@ function macroBlock(cls, label, val, goal, unit) {
     </div>`;
 }
 
-// ── Workout Page ───────────────────────────────────────────────────────────
+// ── Workout Page (Diary) ───────────────────────────────────────────────────
 function renderWorkout() {
-  const exercises = todayWorkouts();
-  const exHtml = exercises.length
-    ? exercises.map((ex, ei) => `
-      <div class="workout-exercise" data-ei="${ei}">
-        <div class="exercise-header">
-          <span class="exercise-name">${ex.name}</span>
-          <button class="btn btn-ghost btn-sm del-exercise" data-ei="${ei}">Remove</button>
-        </div>
-        ${ex.sets.map((s, si) => `
-          <div class="set-row">
-            <span class="set-num">${si + 1}</span>
-            <input class="set-val" type="number" inputmode="decimal" placeholder="kg" value="${s.weight}" data-ei="${ei}" data-si="${si}" data-field="weight" />
-            <span class="set-x">×</span>
-            <input class="set-val" type="number" inputmode="numeric" placeholder="reps" value="${s.reps}" data-ei="${ei}" data-si="${si}" data-field="reps" />
-            <button class="set-del" data-ei="${ei}" data-si="${si}">✕</button>
-          </div>`).join('')}
-        <button class="add-set-btn" data-ei="${ei}">+ Add Set</button>
-      </div>`).join('')
-    : '<div class="empty-msg">No exercises yet — add your first!</div>';
+  const sessions = todaySessions();
+
+  const sessionsHtml = sessions.length
+    ? sessions.map(sess => renderSession(sess)).join('')
+    : '<div class="empty-msg">No workout logged today yet.</div>';
 
   return `
     <div class="card">
       <div class="card-title">Today's Workout</div>
-      ${exHtml}
+      ${sessionsHtml}
+      <button class="btn" id="open-add-session">+ Start a Session (e.g. Back Day)</button>
     </div>
-    <button class="btn" id="open-add-exercise">+ Add Exercise</button>
+
+    <button class="btn btn-ghost" id="open-workout-history">📖 View Workout History</button>
+  `;
+}
+
+function renderSession(sess) {
+  const exHtml = sess.exercises.length
+    ? sess.exercises.map((ex, ei) => `
+      <div class="workout-exercise" data-sess="${sess.id}" data-ei="${ei}">
+        <div class="exercise-header">
+          <span class="exercise-name">${ex.name}</span>
+          <button class="btn btn-ghost btn-sm del-exercise" data-sess="${sess.id}" data-ei="${ei}">Remove</button>
+        </div>
+        ${ex.sets.map((s, si) => `
+          <div class="set-row">
+            <span class="set-num">${si + 1}</span>
+            <input class="set-val" type="number" inputmode="decimal" placeholder="kg" value="${s.weight}" data-sess="${sess.id}" data-ei="${ei}" data-si="${si}" data-field="weight" />
+            <span class="set-x">×</span>
+            <input class="set-val" type="number" inputmode="numeric" placeholder="reps" value="${s.reps}" data-sess="${sess.id}" data-ei="${ei}" data-si="${si}" data-field="reps" />
+            <button class="set-del" data-sess="${sess.id}" data-ei="${ei}" data-si="${si}">✕</button>
+          </div>`).join('')}
+        <button class="add-set-btn" data-sess="${sess.id}" data-ei="${ei}">+ Add Set</button>
+      </div>`).join('')
+    : '<div class="empty-msg">No exercises yet — add one below.</div>';
+
+  return `
+    <div class="session-block">
+      <div class="session-header">
+        <span class="session-type">🏋️ ${sess.type}</span>
+        <button class="btn btn-danger btn-sm del-session" data-sess="${sess.id}">Delete Session</button>
+      </div>
+      ${exHtml}
+      <button class="btn btn-ghost btn-sm add-exercise-to-session" data-sess="${sess.id}">+ Add Exercise</button>
+    </div>`;
+}
+
+// ── Workout History ────────────────────────────────────────────────────────
+function renderWorkoutHistory(filterType) {
+  // Gather all sessions across all dates, newest first
+  const allSessions = [];
+  Object.entries(state.workoutLog).sort((a, b) => b[0].localeCompare(a[0])).forEach(([date, sessions]) => {
+    sessions.forEach(s => allSessions.push({ date, ...s }));
+  });
+
+  const types = [...new Set(allSessions.map(s => s.type))];
+
+  const filtered = filterType ? allSessions.filter(s => s.type === filterType) : allSessions;
+
+  const filterChips = types.length ? `
+    <div class="filter-chips">
+      <button class="chip ${!filterType ? 'active' : ''}" data-filter="">All</button>
+      ${types.map(t => `<button class="chip ${filterType === t ? 'active' : ''}" data-filter="${t}">${t}</button>`).join('')}
+    </div>` : '';
+
+  const list = filtered.length
+    ? filtered.map(s => {
+        const label = s.date === today() ? 'Today' : s.date;
+        const exSummary = s.exercises.map(ex => {
+          const bestSet = ex.sets.filter(st => st.weight && st.reps).slice(-1)[0];
+          const setStr = bestSet ? `${bestSet.weight}kg × ${bestSet.reps}` : `${ex.sets.length} set${ex.sets.length !== 1 ? 's' : ''}`;
+          return `${ex.name}: ${setStr}`;
+        }).join(' · ');
+        return `
+          <div class="history-session">
+            <div class="history-session-head">
+              <span class="history-type">${s.type}</span>
+              <span class="history-date">${label}</span>
+            </div>
+            <div class="history-exercises">${exSummary || 'No exercises logged'}</div>
+          </div>`;
+      }).join('')
+    : '<div class="empty-msg">No sessions logged yet for this filter.</div>';
+
+  return `
+    <div class="modal-title">Workout History</div>
+    ${filterChips}
+    <div class="history-list">${list}</div>
+    <button class="btn btn-ghost" id="close-history" style="margin-top:14px">Close</button>
   `;
 }
 
@@ -208,15 +306,15 @@ function renderProgress() {
       </div>`;
   }).join('') || '<div class="empty-msg">No history yet — start logging!</div>';
 
-  const workoutDays = Object.keys(state.workouts).sort().reverse().slice(0, 7);
+  const workoutDays = Object.keys(state.workoutLog).sort().reverse().slice(0, 7);
   const workoutHist = workoutDays.map(d => {
-    const exs = state.workouts[d];
+    const sessions = state.workoutLog[d];
     const label = d === today() ? 'Today' : d;
     return `
       <div class="progress-day" style="border-color:var(--blue)">
         <div class="progress-day-date">${label}</div>
-        <div class="progress-day-cal" style="color:var(--blue)">${exs.length} exercise${exs.length !== 1 ? 's' : ''}</div>
-        <div class="progress-day-macros">${exs.map(e => e.name).join(', ')}</div>
+        <div class="progress-day-cal" style="color:var(--blue)">${sessions.map(s => s.type).join(', ')}</div>
+        <div class="progress-day-macros">${sessions.reduce((n, s) => n + s.exercises.length, 0)} exercise(s) total</div>
       </div>`;
   }).join('') || '<div class="empty-msg">No workout history yet.</div>';
 
@@ -257,14 +355,14 @@ function renderSettings() {
         <button class="btn btn-danger btn-sm" id="clear-today-food">Clear</button>
       </div>
       <div class="setting-row">
-        <div><div class="setting-label">Clear Today's Workout</div><div class="setting-sub">Remove all exercises for today</div></div>
+        <div><div class="setting-label">Clear Today's Workout</div><div class="setting-sub">Remove all sessions for today</div></div>
         <button class="btn btn-danger btn-sm" id="clear-today-workout">Clear</button>
       </div>
     </div>
   `;
 }
 
-// ── Add Food Modal (Search + Manual) ──────────────────────────────────────
+// ── Add Food Modal (Search + Barcode + Manual, with units) ─────────────────
 function showAddFoodModal(meal) {
   pendingMeal = meal || 'snacks';
   const mealInfo = MEALS.find(m => m.key === pendingMeal);
@@ -274,9 +372,9 @@ function showAddFoodModal(meal) {
     <div class="modal-sheet">
       <div class="modal-title">Add Food — ${mealInfo.icon} ${mealInfo.label}</div>
 
-      <!-- Tab switcher -->
       <div class="tab-switch">
         <button class="tab-btn active" data-tab="search">🔍 Search</button>
+        <button class="tab-btn" data-tab="barcode">📷 Barcode</button>
         <button class="tab-btn" data-tab="manual">✏️ Manual</button>
       </div>
 
@@ -290,9 +388,27 @@ function showAddFoodModal(meal) {
         <div id="search-results"></div>
       </div>
 
+      <!-- Barcode tab -->
+      <div id="tab-barcode" style="display:none">
+        <div id="barcode-reader"></div>
+        <div id="barcode-status" class="search-status">Tap "Start Scanning" to use your camera.</div>
+        <button class="btn btn-sm" id="start-scan-btn">Start Scanning</button>
+        <div id="barcode-results"></div>
+      </div>
+
       <!-- Manual tab -->
       <div id="tab-manual" style="display:none">
         <div class="field"><label>Food Name</label><input type="text" id="f-name" placeholder="e.g. Chicken Breast" /></div>
+        <div class="field-row">
+          <div class="field"><label>Amount</label><input type="number" inputmode="decimal" id="f-amount" placeholder="100" value="100" /></div>
+          <div class="field"><label>Unit</label>
+            <select id="f-unit">
+              <option value="g">grams (g)</option>
+              <option value="ml">millilitres (ml)</option>
+              <option value="serving">serving(s)</option>
+            </select>
+          </div>
+        </div>
         <div class="field-row">
           <div class="field"><label>Calories</label><input type="number" inputmode="numeric" id="f-cal" placeholder="0" /></div>
           <div class="field"><label>Protein (g)</label><input type="number" inputmode="decimal" id="f-pro" placeholder="0" /></div>
@@ -315,27 +431,29 @@ function showAddFoodModal(meal) {
   // Tab switching
   overlay.querySelectorAll('.tab-btn').forEach(btn => {
     btn.addEventListener('click', () => {
+      // stop camera if leaving barcode tab
+      if (btn.dataset.tab !== 'barcode') stopBarcodeScanner();
       overlay.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       const tab = btn.dataset.tab;
-      document.getElementById('tab-search').style.display = tab === 'search' ? '' : 'none';
-      document.getElementById('tab-manual').style.display  = tab === 'manual' ? '' : 'none';
+      document.getElementById('tab-search').style.display  = tab === 'search'  ? '' : 'none';
+      document.getElementById('tab-barcode').style.display = tab === 'barcode' ? '' : 'none';
+      document.getElementById('tab-manual').style.display  = tab === 'manual'  ? '' : 'none';
       if (tab === 'search') document.getElementById('food-search-input').focus();
       if (tab === 'manual') document.getElementById('f-name').focus();
     });
   });
 
   // Close
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-  document.getElementById('search-cancel').addEventListener('click', () => overlay.remove());
-  document.getElementById('manual-cancel').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => { if (e.target === overlay) { stopBarcodeScanner(); overlay.remove(); } });
+  document.getElementById('search-cancel').addEventListener('click', () => { stopBarcodeScanner(); overlay.remove(); });
+  document.getElementById('manual-cancel').addEventListener('click', () => { stopBarcodeScanner(); overlay.remove(); });
 
-  // Search
+  // ── Text Search ──
   const searchInput = document.getElementById('food-search-input');
   const searchBtn   = document.getElementById('food-search-btn');
   const statusEl    = document.getElementById('search-status');
   const resultsEl   = document.getElementById('search-results');
-
   searchInput.focus();
 
   async function doSearch() {
@@ -344,75 +462,30 @@ function showAddFoodModal(meal) {
     statusEl.textContent = 'Searching…';
     resultsEl.innerHTML = '';
     searchBtn.disabled = true;
-
     try {
-      const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=10&fields=product_name,nutriments,brands`;
+      const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=10&fields=product_name,nutriments,brands,serving_size`;
       const res  = await fetch(url);
       const data = await res.json();
-      const products = (data.products || []).filter(p =>
-        p.product_name &&
-        p.nutriments &&
-        p.nutriments['energy-kcal_100g'] != null
-      );
-
-      if (!products.length) {
-        statusEl.textContent = 'No results found. Try manual entry.';
-      } else {
-        statusEl.textContent = `${products.length} result${products.length !== 1 ? 's' : ''} found`;
-        resultsEl.innerHTML = products.map((p, i) => {
-          const n   = p.nutriments;
-          const cal = Math.round(n['energy-kcal_100g'] || 0);
-          const pro = Math.round(n['proteins_100g']    || 0);
-          const carb= Math.round(n['carbohydrates_100g']|| 0);
-          const fat = Math.round(n['fat_100g']          || 0);
-          const brand = p.brands ? `<span class="result-brand">${p.brands.split(',')[0]}</span>` : '';
-          return `
-            <div class="search-result" data-idx="${i}">
-              <div class="result-name">${p.product_name} ${brand}</div>
-              <div class="result-macros">${cal} kcal · P ${pro}g · C ${carb}g · F ${fat}g <span class="result-per">per 100g</span></div>
-              <div class="result-serving-row">
-                <label>Serving size (g)</label>
-                <input class="serving-input" type="number" inputmode="numeric" value="100" min="1" data-idx="${i}" />
-                <button class="btn btn-sm result-add-btn" data-idx="${i}"
-                  data-name="${p.product_name.replace(/"/g,'&quot;')}"
-                  data-cal="${cal}" data-pro="${pro}" data-carb="${carb}" data-fat="${fat}">Add</button>
-              </div>
-            </div>`;
-        }).join('');
-
-        // Add buttons
-        resultsEl.querySelectorAll('.result-add-btn').forEach(btn => {
-          btn.addEventListener('click', () => {
-            const idx     = btn.dataset.idx;
-            const serving = parseFloat(resultsEl.querySelector(`.serving-input[data-idx="${idx}"]`).value) || 100;
-            const ratio   = serving / 100;
-            addFoodEntry({
-              name:     btn.dataset.name + ` (${serving}g)`,
-              calories: parseFloat(btn.dataset.cal)  * ratio,
-              protein:  parseFloat(btn.dataset.pro)  * ratio,
-              carbs:    parseFloat(btn.dataset.carb) * ratio,
-              fat:      parseFloat(btn.dataset.fat)  * ratio,
-            });
-            overlay.remove();
-          });
-        });
-      }
+      renderFoodResults(data.products, resultsEl, statusEl);
     } catch (err) {
       statusEl.textContent = 'Search failed — check your connection or use manual entry.';
     }
-
     searchBtn.disabled = false;
   }
-
   searchBtn.addEventListener('click', doSearch);
   searchInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
 
-  // Manual save
+  // ── Barcode Scan ──
+  document.getElementById('start-scan-btn').addEventListener('click', () => startBarcodeScanner(overlay));
+
+  // ── Manual save ──
   document.getElementById('manual-save').addEventListener('click', () => {
     const name = document.getElementById('f-name').value.trim();
     if (!name) return;
     addFoodEntry({
       name,
+      amount:   parseFloat(document.getElementById('f-amount').value) || 100,
+      unit:     document.getElementById('f-unit').value,
       calories: parseFloat(document.getElementById('f-cal').value)  || 0,
       protein:  parseFloat(document.getElementById('f-pro').value)  || 0,
       carbs:    parseFloat(document.getElementById('f-carb').value) || 0,
@@ -420,6 +493,121 @@ function showAddFoodModal(meal) {
     });
     overlay.remove();
   });
+}
+
+function renderFoodResults(products, resultsEl, statusEl) {
+  const filtered = (products || []).filter(p =>
+    p.product_name && p.nutriments && p.nutriments['energy-kcal_100g'] != null
+  );
+
+  if (!filtered.length) {
+    statusEl.textContent = 'No results found. Try manual entry.';
+    resultsEl.innerHTML = '';
+    return;
+  }
+
+  statusEl.textContent = `${filtered.length} result${filtered.length !== 1 ? 's' : ''} found`;
+  resultsEl.innerHTML = filtered.map((p, i) => {
+    const n    = p.nutriments;
+    const cal  = Math.round(n['energy-kcal_100g']  || 0);
+    const pro  = Math.round(n['proteins_100g']     || 0);
+    const carb = Math.round(n['carbohydrates_100g']|| 0);
+    const fat  = Math.round(n['fat_100g']          || 0);
+    const brand = p.brands ? `<span class="result-brand">${p.brands.split(',')[0]}</span>` : '';
+    return `
+      <div class="search-result" data-idx="${i}">
+        <div class="result-name">${p.product_name} ${brand}</div>
+        <div class="result-macros">${cal} kcal · P ${pro}g · C ${carb}g · F ${fat}g <span class="result-per">per 100g</span></div>
+        <div class="result-serving-row">
+          <input class="serving-input" type="number" inputmode="numeric" value="100" min="1" data-idx="${i}" />
+          <select class="serving-unit" data-idx="${i}">
+            <option value="g">g</option>
+            <option value="ml">ml</option>
+            <option value="serving">serving</option>
+          </select>
+          <button class="btn btn-sm result-add-btn" data-idx="${i}"
+            data-name="${p.product_name.replace(/"/g,'&quot;')}"
+            data-cal="${cal}" data-pro="${pro}" data-carb="${carb}" data-fat="${fat}">Add</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  resultsEl.querySelectorAll('.result-add-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx     = btn.dataset.idx;
+      const amount  = parseFloat(resultsEl.querySelector(`.serving-input[data-idx="${idx}"]`).value) || 100;
+      const unit    = resultsEl.querySelector(`.serving-unit[data-idx="${idx}"]`).value;
+      // ratio is per-100(g/ml); "serving" unit just uses the raw per-100 values as-is times amount/1
+      const ratio   = unit === 'serving' ? amount : (amount / 100);
+      addFoodEntry({
+        name:     btn.dataset.name,
+        amount, unit,
+        calories: parseFloat(btn.dataset.cal)  * ratio,
+        protein:  parseFloat(btn.dataset.pro)  * ratio,
+        carbs:    parseFloat(btn.dataset.carb) * ratio,
+        fat:      parseFloat(btn.dataset.fat)  * ratio,
+      });
+      document.querySelector('.modal-overlay')?.remove();
+    });
+  });
+}
+
+// ── Barcode Scanner ────────────────────────────────────────────────────────
+function startBarcodeScanner(overlay) {
+  const statusEl = document.getElementById('barcode-status');
+  const resultsEl = document.getElementById('barcode-results');
+  if (typeof Html5Qrcode === 'undefined') {
+    statusEl.textContent = 'Camera library failed to load — check your connection.';
+    return;
+  }
+  statusEl.textContent = 'Starting camera…';
+  html5QrCode = new Html5Qrcode("barcode-reader");
+
+  html5QrCode.start(
+    { facingMode: "environment" },
+    { fps: 10, qrbox: { width: 250, height: 150 } },
+    async (decodedText) => {
+      statusEl.textContent = `Found barcode: ${decodedText} — looking up…`;
+      stopBarcodeScanner();
+      await lookupBarcode(decodedText, statusEl, resultsEl);
+    },
+    () => { /* ignore per-frame scan failures */ }
+  ).catch(err => {
+    statusEl.textContent = 'Could not access camera. Check permissions in Settings.';
+  });
+}
+
+function stopBarcodeScanner() {
+  if (html5QrCode) {
+    html5QrCode.stop().then(() => html5QrCode.clear()).catch(() => {});
+    html5QrCode = null;
+  }
+}
+
+async function lookupBarcode(barcode, statusEl, resultsEl) {
+  try {
+    const url = `https://world.openfoodfacts.org/api/v2/product/${barcode}.json`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.status !== 1 || !data.product) {
+      statusEl.textContent = 'Product not found in database. Try search or manual entry.';
+      return;
+    }
+    const p = data.product;
+    const n = p.nutriments || {};
+    if (n['energy-kcal_100g'] == null) {
+      statusEl.textContent = 'Product found but missing nutrition data. Try manual entry.';
+      return;
+    }
+    statusEl.textContent = 'Product found!';
+    renderFoodResults([{
+      product_name: p.product_name || 'Unknown product',
+      brands: p.brands,
+      nutriments: n,
+    }], resultsEl, { textContent: '' }); // reuse render logic, dummy status holder
+  } catch (err) {
+    statusEl.textContent = 'Lookup failed — check your connection.';
+  }
 }
 
 function addFoodEntry(entry) {
@@ -430,8 +618,49 @@ function addFoodEntry(entry) {
   navigate('nutrition');
 }
 
-// ── Add Exercise Modal ─────────────────────────────────────────────────────
-function showAddExerciseModal() {
+// ── Workout Session Modals ─────────────────────────────────────────────────
+function showAddSessionModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-sheet">
+      <div class="modal-title">Start Workout Session</div>
+      <div class="field"><label>Session Type</label>
+        <input type="text" id="sess-type" placeholder="e.g. Back Day" list="workout-types" />
+        <datalist id="workout-types">
+          ${WORKOUT_TYPES.map(t => `<option value="${t}">`).join('')}
+        </datalist>
+      </div>
+      <div class="quick-types">
+        ${WORKOUT_TYPES.map(t => `<button class="chip quick-type-btn" data-type="${t}">${t}</button>`).join('')}
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="modal-cancel">Cancel</button>
+        <button class="btn" id="modal-save-sess">Start</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const input = document.getElementById('sess-type');
+  input.focus();
+
+  overlay.querySelectorAll('.quick-type-btn').forEach(btn => {
+    btn.addEventListener('click', () => { input.value = btn.dataset.type; });
+  });
+
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.getElementById('modal-cancel').addEventListener('click', () => overlay.remove());
+  document.getElementById('modal-save-sess').addEventListener('click', () => {
+    const type = input.value.trim();
+    if (!type) return;
+    if (!state.workoutLog[today()]) state.workoutLog[today()] = [];
+    state.workoutLog[today()].push({ id: uid(), type, exercises: [] });
+    save();
+    overlay.remove();
+    navigate('workout');
+  });
+}
+
+function showAddExerciseModal(sessId) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
@@ -451,11 +680,28 @@ function showAddExerciseModal() {
   document.getElementById('modal-save-ex').addEventListener('click', () => {
     const name = document.getElementById('e-name').value.trim();
     if (!name) return;
-    if (!state.workouts[today()]) state.workouts[today()] = [];
-    state.workouts[today()].push({ name, sets: [{ weight: '', reps: '' }] });
+    const sess = state.workoutLog[today()].find(s => s.id === sessId);
+    sess.exercises.push({ name, sets: [{ weight: '', reps: '' }] });
     save();
     overlay.remove();
     navigate('workout');
+  });
+}
+
+function showWorkoutHistoryModal(filterType) {
+  const existing = document.getElementById('history-overlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'history-overlay';
+  overlay.innerHTML = `<div class="modal-sheet">${renderWorkoutHistory(filterType)}</div>`;
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.getElementById('close-history').addEventListener('click', () => overlay.remove());
+  overlay.querySelectorAll('.chip').forEach(chip => {
+    chip.addEventListener('click', () => showWorkoutHistoryModal(chip.dataset.filter || null));
   });
 }
 
@@ -474,32 +720,54 @@ function attachListeners(page) {
   }
 
   if (page === 'workout') {
-    document.getElementById('open-add-exercise')?.addEventListener('click', showAddExerciseModal);
+    document.getElementById('open-add-session')?.addEventListener('click', showAddSessionModal);
+    document.getElementById('open-workout-history')?.addEventListener('click', () => showWorkoutHistoryModal(null));
+
+    document.querySelectorAll('.del-session').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (!confirm('Delete this session?')) return;
+        const arr = state.workoutLog[today()];
+        const idx = arr.findIndex(s => s.id === btn.dataset.sess);
+        arr.splice(idx, 1);
+        save(); navigate('workout');
+      });
+    });
+
+    document.querySelectorAll('.add-exercise-to-session').forEach(btn => {
+      btn.addEventListener('click', () => showAddExerciseModal(btn.dataset.sess));
+    });
+
     document.querySelectorAll('.del-exercise').forEach(btn => {
       btn.addEventListener('click', () => {
-        state.workouts[today()].splice(parseInt(btn.dataset.ei), 1);
+        const sess = state.workoutLog[today()].find(s => s.id === btn.dataset.sess);
+        sess.exercises.splice(parseInt(btn.dataset.ei), 1);
         save(); navigate('workout');
       });
     });
+
     document.querySelectorAll('.add-set-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        state.workouts[today()][parseInt(btn.dataset.ei)].sets.push({ weight: '', reps: '' });
+        const sess = state.workoutLog[today()].find(s => s.id === btn.dataset.sess);
+        sess.exercises[parseInt(btn.dataset.ei)].sets.push({ weight: '', reps: '' });
         save(); navigate('workout');
       });
     });
+
     document.querySelectorAll('.set-del').forEach(btn => {
       btn.addEventListener('click', () => {
-        const ei = parseInt(btn.dataset.ei), si = parseInt(btn.dataset.si);
-        const sets = state.workouts[today()][ei].sets;
+        const sess = state.workoutLog[today()].find(s => s.id === btn.dataset.sess);
+        const sets = sess.exercises[parseInt(btn.dataset.ei)].sets;
         if (sets.length <= 1) return;
-        sets.splice(si, 1);
+        sets.splice(parseInt(btn.dataset.si), 1);
         save(); navigate('workout');
       });
     });
+
     document.querySelectorAll('.set-val').forEach(input => {
       input.addEventListener('change', () => {
+        const sess = state.workoutLog[today()].find(s => s.id === input.dataset.sess);
         const ei = parseInt(input.dataset.ei), si = parseInt(input.dataset.si);
-        state.workouts[today()][ei].sets[si][input.dataset.field] = input.value;
+        sess.exercises[ei].sets[si][input.dataset.field] = input.value;
         save();
       });
     });
@@ -521,8 +789,8 @@ function attachListeners(page) {
       save(); navigate('settings');
     });
     document.getElementById('clear-today-workout')?.addEventListener('click', () => {
-      if (!confirm('Clear today\'s workout?')) return;
-      state.workouts[today()] = [];
+      if (!confirm('Clear today\'s workout sessions?')) return;
+      state.workoutLog[today()] = [];
       save(); navigate('settings');
     });
   }
